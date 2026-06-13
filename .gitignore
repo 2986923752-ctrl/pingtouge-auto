@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project specific
+logs/
+*.xlsx
+!accounts.example.xlsx
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / sensitive
+answer_bank.json
+accounts.xlsx
