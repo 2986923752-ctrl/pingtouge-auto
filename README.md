@@ -140,6 +140,8 @@ pingtouge_auto/
 ├── browser.py           # 浏览器管理（启动、登录、导航）
 ├── extractor.py         # 答案提取器（单选 + CodeMirror 代码）
 ├── filler.py            # 答案填充器（填入 + 评测验证）
+├── adapter_base.py      # 平台适配器基类（可扩展新平台）
+├── adapter_pingtouge.py # 平头哥平台适配器实现
 ├── utils.py             # 工具函数（日志、重试、截图）
 ├── requirements.txt     # Python 依赖
 ├── accounts.xlsx        # 目标账号列表（需自行创建）
@@ -173,6 +175,46 @@ pingtouge_auto/
 | `--headless` | 无头模式 | 关闭 |
 | `--no-submit` | 填入但不评测 | 关闭 |
 | `--version` | 显示版本号 | - |
+
+## 适配其他平台
+
+本项目采用**平台适配器架构**，核心自动化流程（登录→提取→构建答案库→多账号填入→评测）与具体平台解耦。
+
+### 已支持平台
+
+| 平台 | 适配器 | 特征 |
+|------|--------|------|
+| 平头哥实训 | `adapter_pingtouge.py` | CodeMirror 6 + Element UI + 关卡制 |
+
+### 如何适配新平台
+
+只需继承 `PlatformAdapter` 基类，实现约 **15 个方法**，即可复用全部自动化能力：
+
+1. **创建适配器文件**，如 `adapter_zhihuishu.py`
+2. **实现提取接口**：`extract_code()` / `extract_quiz_answers()` — 告诉脚本如何从页面提取答案
+3. **实现填入接口**：`fill_code()` / `fill_quiz_answer()` — 告诉脚本如何填入答案
+4. **实现导航接口**：`has_next_level()` / `click_next_level()` / `click_submit()` — 告诉脚本如何操作页面
+5. **注册适配器**：加一行 `@register_adapter("your_platform")`
+6. **配置平台 URL** 和选择器，即可运行
+
+```python
+# 示例：适配智慧树/超星/中国大学MOOC 只需这样
+from adapter_base import PlatformAdapter, register_adapter
+
+@register_adapter("zhihuishu")
+class ZhihuishuAdapter(PlatformAdapter):
+    platform_name = "智慧树"
+
+    async def extract_code(self, page, logger) -> str:
+        # 智慧树用 Monaco Editor，不是 CodeMirror
+        return await page.evaluate("monaco.editor.getModels()[0].getValue()")
+
+    async def detect_page_type(self, page) -> str:
+        # 智慧树的页面结构不同
+        ...
+```
+
+**本质上是同一套自动化理念**——只是每家的编辑器组件和按钮文本不一样。
 
 ## 常见问题
 
