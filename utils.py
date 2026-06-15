@@ -105,3 +105,26 @@ def log_step(logger: logging.Logger, step: str, account: str = "") -> None:
     """打印步骤日志，可选带账号前缀"""
     prefix = f"[{account}] " if account else ""
     logger.info(f"{prefix}{step}")
+
+
+async def wait_for_loading_done(page, logger=None, timeout=15_000) -> bool:
+    """
+    等待页面遮罩层（Element UI loading mask）消失。
+
+    许多在线教育平台使用 el-loading-mask 覆盖页面，
+    在此期间点击任何元素都会失败。此函数轮询等待其消失。
+    """
+    import asyncio as _asyncio
+    deadline = time.monotonic() + timeout / 1000
+    while time.monotonic() < deadline:
+        mask = await page.query_selector(".el-loading-mask")
+        if not mask:
+            return True
+        # 检查是否可见（有些 mask 是隐藏的）
+        visible = await mask.evaluate("el => el.offsetParent !== null")
+        if not visible:
+            return True
+        await _asyncio.sleep(0.5)
+    if logger:
+        logger.warning(f"等待 loading mask 消失超时 ({timeout}ms)，继续执行")
+    return False

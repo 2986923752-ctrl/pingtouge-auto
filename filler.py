@@ -7,13 +7,14 @@ import logging
 
 from playwright.async_api import Page
 
-from utils import log_step
+from utils import log_step, wait_for_loading_done
 
 
 # ─── 编辑器操作 ───
 
 async def _clear_editor(page: Page, logger: logging.Logger) -> bool:
     """清空 CodeMirror 编辑器"""
+    await wait_for_loading_done(page)
     await page.wait_for_selector(".cm-editor", timeout=10_000)
     await page.wait_for_timeout(500)
 
@@ -168,10 +169,9 @@ async def fill_code_levels(
 
     for idx, level_info in enumerate(code_levels):
         level_name = level_info.get("name", f"第{idx + 1}关")
-        code: str = level_info.get("code", "")
-        if not code:
-            logger.warning(f"  关卡 [{level_name}]: 代码为空")
-            all_passed = False
+        code: str = level_info.get("code", "").strip()
+        if len(code) < 5:
+            logger.warning(f"  关卡 [{level_name}]: 代码为空或过短 ({len(code)}字符)，跳过")
             continue
 
         await page.wait_for_timeout(1000)

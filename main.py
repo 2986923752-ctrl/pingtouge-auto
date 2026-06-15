@@ -40,7 +40,7 @@ from config import (
 from browser import launch_browser, create_context, login, close_context
 from extractor import read_combat_levels
 from filler import fill_all_answers
-from utils import setup_logging, screenshot
+from utils import setup_logging, screenshot, wait_for_loading_done
 
 
 # ─── CLI ───
@@ -137,6 +137,7 @@ async def get_weeks(page: Page) -> list[str]:
 
 async def scan_experiments(page: Page) -> list[dict]:
     """扫描课堂实验列表，过滤空名（页面未完全加载时的保护）"""
+    await wait_for_loading_done(page)
     await page.wait_for_selector(".li-item", timeout=10_000)
     await page.wait_for_timeout(500)
     items = await page.query_selector_all(".li-item")
@@ -152,7 +153,7 @@ async def scan_experiments(page: Page) -> list[dict]:
 
 
 async def click_week(page: Page, week: str) -> None:
-    """点击指定周标签"""
+    """点击指定周标签，等待加载完成"""
     await page.evaluate(f"""
         () => {{
             const spans = document.querySelectorAll('span');
@@ -162,6 +163,7 @@ async def click_week(page: Page, week: str) -> None:
         }}
     """)
     await page.wait_for_timeout(1000)
+    await wait_for_loading_done(page)
 
 
 async def close_extra_pages(ctx: BrowserContext, keep_page: Page) -> None:
@@ -171,6 +173,7 @@ async def close_extra_pages(ctx: BrowserContext, keep_page: Page) -> None:
             await p.close()
     await keep_page.bring_to_front()
     await keep_page.wait_for_timeout(1000)
+    await wait_for_loading_done(keep_page)
     await keep_page.wait_for_selector(".li-item", timeout=10_000)
     await keep_page.wait_for_timeout(500)
 
@@ -188,6 +191,7 @@ async def fill_one_experiment(
 ) -> bool:
     """填入一个实验的所有未完成关卡"""
     # 重新定位实验并点击「开始实验」
+    await wait_for_loading_done(page)
     exps = await scan_experiments(page)
     target = next((e for e in exps if e["name"] == exp_name), None)
     if not target:
@@ -200,6 +204,7 @@ async def fill_one_experiment(
         return False
     await btn.click()
     await page.wait_for_timeout(4000)
+    await wait_for_loading_done(page)
 
     detail = get_detail_page(ctx)
     if not detail:
@@ -207,6 +212,7 @@ async def fill_one_experiment(
         return False
     await detail.bring_to_front()
     await detail.wait_for_load_state("networkidle")
+    await wait_for_loading_done(detail)
     await detail.wait_for_timeout(2000)
 
     # 读关卡表
@@ -227,22 +233,40 @@ async def fill_one_experiment(
         return False
     await enter.click()
     await detail.wait_for_timeout(4000)
+    await wait_for_loading_done(detail)
 
     code_page = get_code_page(ctx) or (detail if "/class/code" in detail.url else None)
     if not code_page:
         logger.error("    未找到代码页面")
         return False
     await code_page.bring_to_front()
+    await wait_for_loading_done(code_page)
     await code_page.wait_for_timeout(2000)
 
-    # 匹配答案
-    needed = [src_levels[i] for i in uncompleted if i < len(src_levels)]
+    # 匹配答案（跳过源答案库中代码为空的关卡）
+    needed: list[dict] = []
+    skipped_empty: list[str] = []
+    for i in uncompleted:
+        if i < len(src_levels):
+            code = src_levels[i].get("code", "").strip()
+            if len(code) >= 5:
+                needed.append(src_levels[i])
+            else:
+                skipped_empty.append(src_levels[i].get("name", f"#{i+1}"))
+    if skipped_empty:
+        logger.warning(f"    ⚠ 跳过 {len(skipped_empty)} 个空代码关卡（源答案库不完整）: {skipped_empty}")
     logger.info(f"    填入 {len(needed)} 关 (源共{len(src_levels)}关)")
 
     if dry_run:
-        logger.info(f"    [DRY-RUN] 将填入: {[lv['name'] for lv in needed]}")
+        preview_names = [lv['name'] for lv in needed]
+        logger.info(f"    [DRY-RUN] 将填入: {preview_names}")
         await close_extra_pages(ctx, page)
         return True
+
+    if not needed:
+        logger.warning("    没有可填入的有效关卡（所有关卡代码均为空）")
+        await close_extra_pages(ctx, page)
+        return False
 
     fill_ok = await fill_all_answers(
         code_page, {"type": "code", "code_levels": needed}, logger
@@ -312,6 +336,7 @@ async def main() -> None:
                     args.classroom, wait_until="networkidle", timeout=60_000
                 )
                 await page.wait_for_timeout(3000)
+                await wait_for_loading_done(page)
                 await page.wait_for_selector(".li-item", timeout=15_000)
                 await page.wait_for_timeout(2000)
 
@@ -331,6 +356,7 @@ async def main() -> None:
                         logger.warning(f"  {week}: 实验名异常，刷新页面...")
                         await page.reload(wait_until="networkidle")
                         await page.wait_for_timeout(3000)
+                        await wait_for_loading_done(page)
                         await click_week(page, week)
                         exps = await scan_experiments(page)
 

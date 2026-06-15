@@ -15,6 +15,7 @@ from adapter_base import (
     LevelStatus,
     register_adapter,
 )
+from utils import wait_for_loading_done
 
 
 @register_adapter("pingtouge")
@@ -127,6 +128,7 @@ class PingtougeAdapter(PlatformAdapter):
     async def fill_code(
         self, page: Page, code: str, logger: logging.Logger
     ) -> bool:
+        await wait_for_loading_done(page)
         try:
             await page.keyboard.insert_text(code)
             await page.wait_for_timeout(500)
@@ -204,6 +206,7 @@ class PingtougeAdapter(PlatformAdapter):
     async def click_start_experiment(
         self, page: Page, exp_name: str, logger: logging.Logger
     ) -> bool:
+        await wait_for_loading_done(page)
         await page.wait_for_selector(".li-item", timeout=10_000)
         await page.wait_for_timeout(500)
         items = await page.query_selector_all(".li-item")
@@ -230,12 +233,14 @@ class PingtougeAdapter(PlatformAdapter):
 
         await detail.bring_to_front()
         await detail.wait_for_load_state("networkidle")
+        await wait_for_loading_done(detail)
         await detail.wait_for_timeout(2000)
 
         enter = await detail.query_selector("button:has-text('进入实验')")
         if enter:
             await enter.click()
             await detail.wait_for_timeout(4000)
+            await wait_for_loading_done(detail)
 
         code_page = None
         for p in ctx.pages:

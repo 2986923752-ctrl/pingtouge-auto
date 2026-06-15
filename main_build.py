@@ -7,6 +7,8 @@
   python main_build.py --account <user> --password <pwd>  # 指定源账号
   python main_build.py --output my_bank.json        # 指定输出文件
 """
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
@@ -15,15 +17,20 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from playwright.async_api import BrowserContext, Page
+
 from config import (
     ANSWER_BANK_PATH,
     CLASSROOM_URL,
     DEFAULT_PASSWORD,
-    HEADLESS,
 )
 from browser import launch_browser, create_context, login, close_context
 from extractor import extract_all_answers, read_combat_levels
-from utils import setup_logging, screenshot
+from utils import setup_logging, screenshot, wait_for_loading_done
+
+
+# 提取代码的最低字符数要求（低于此值视为源账号未完成该关卡）
+MIN_CODE_LENGTH = 10
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-async def get_weeks(page) -> list[str]:
+async def get_weeks(page: Page) -> list[str]:
     """扫描课堂页面所有周标签"""
     return await page.evaluate("""
         () => Array.from(document.querySelectorAll('span'))
@@ -53,8 +60,9 @@ async def get_weeks(page) -> list[str]:
     """)
 
 
-async def scan_experiments(page) -> list[dict]:
-    """扫描当前周的实验列表"""
+async def scan_experiments(page: Page) -> list[dict]:
+    """扫描当前周的实验列表（自动等待 loading mask 消失）"""
+    await wait_for_loading_done(page)
     await page.wait_for_selector(".li-item", timeout=10_000)
     await page.wait_for_timeout(500)
     items = await page.query_selector_all(".li-item")
@@ -69,8 +77,8 @@ async def scan_experiments(page) -> list[dict]:
     return result
 
 
-async def click_week(page, week: str) -> None:
-    """点击周标签"""
+async def click_week(page: Page, week: str) -> None:
+    """点击周标签，等待加载完成"""
     await page.evaluate(f"""
         () => {{
             const spans = document.querySelectorAll('span');
@@ -80,9 +88,11 @@ async def click_week(page, week: str) -> None:
         }}
     """)
     await page.wait_for_timeout(1000)
+    await wait_for_loading_done(page)
 
 
-async def get_code_page(ctx):
+# 注意: ctx.pages 是同步属性，get_code_page/get_detail_page 必须是普通函数
+def get_code_page(ctx: BrowserContext) -> Page | None:
     """从浏览器上下文中找到代码页面"""
     for p in ctx.pages:
         if "/class/code" in p.url:
@@ -90,7 +100,7 @@ async def get_code_page(ctx):
     return None
 
 
-async def get_detail_page(ctx):
+def get_detail_page(ctx: BrowserContext) -> Page | None:
     """从浏览器上下文中找到实训详情页面"""
     for p in ctx.pages:
         if "/class/combat/detail" in p.url:
@@ -98,18 +108,41 @@ async def get_detail_page(ctx):
     return None
 
 
-async def close_extra_pages(ctx, keep_page) -> None:
+async def close_extra_pages(ctx: BrowserContext, keep_page: Page) -> None:
     """关闭代码和详情页，回到课堂列表"""
     for p in ctx.pages[:]:
         if p != keep_page and ("/class/code" in p.url or "/class/combat/detail" in p.url):
             await p.close()
     await keep_page.bring_to_front()
     await keep_page.wait_for_timeout(1000)
+    await wait_for_loading_done(keep_page)
     await keep_page.wait_for_selector(".li-item", timeout=10_000)
     await keep_page.wait_for_timeout(500)
 
 
-async def extract_one_experiment(page, ctx, exp_name: str, logger) -> dict | None:
+def _filter_valid_levels(code_levels: list[dict], logger) -> list[dict]:
+    """
+    过滤掉源账号未完成的空代码关卡。
+
+    源账号没有做完某个实验时，提取到的代码会是空字符串或极短的占位内容。
+    这些关卡无法用于填入，需要标记并排除。
+    """
+    valid: list[dict] = []
+    skipped: list[str] = []
+    for lv in code_levels:
+        code = lv.get("code", "").strip()
+        if len(code) >= MIN_CODE_LENGTH:
+            valid.append(lv)
+        else:
+            skipped.append(lv.get("name", "?"))
+    if skipped:
+        logger.warning(f"    ⚠ 跳过 {len(skipped)} 个空代码关卡（源账号未完成）: {skipped}")
+    return valid
+
+
+async def extract_one_experiment(
+    page: Page, ctx: BrowserContext, exp_name: str, logger
+) -> dict | None:
     """
     提取一个实验的所有答案。
 
@@ -117,6 +150,7 @@ async def extract_one_experiment(page, ctx, exp_name: str, logger) -> dict | Non
         {"type": "code", "quiz": {}, "code_levels": [...]} 或 None
     """
     # 重新定位实验并点击「开始实验」
+    await wait_for_loading_done(page)
     exps = await scan_experiments(page)
     target = next((e for e in exps if e["name"] == exp_name), None)
     if not target:
@@ -129,13 +163,16 @@ async def extract_one_experiment(page, ctx, exp_name: str, logger) -> dict | Non
         return None
     await btn.click()
     await page.wait_for_timeout(4000)
+    await wait_for_loading_done(page)
 
+    # get_detail_page 是同步函数（ctx.pages 是同步属性）
     detail = get_detail_page(ctx)
     if not detail:
         logger.error("    未找到详情页")
         return None
     await detail.bring_to_front()
     await detail.wait_for_load_state("networkidle")
+    await wait_for_loading_done(detail)
     await detail.wait_for_timeout(2000)
 
     # 读取关卡表确认有未完成关卡
@@ -149,17 +186,29 @@ async def extract_one_experiment(page, ctx, exp_name: str, logger) -> dict | Non
         return None
     await enter.click()
     await detail.wait_for_timeout(4000)
+    await wait_for_loading_done(detail)
 
+    # get_code_page 是同步函数
     code_page = get_code_page(ctx) or (detail if "/class/code" in detail.url else None)
     if not code_page:
         logger.error("    未找到代码页面")
         return None
     await code_page.bring_to_front()
+    await wait_for_loading_done(code_page)
     await code_page.wait_for_timeout(2000)
 
     # 提取答案
     result = await extract_all_answers(code_page, logger, page_type="auto")
     await screenshot(code_page, f"extracted_{exp_name}", logger)
+
+    # 过滤空代码关卡（源账号未完成的部分）
+    if result and result.get("type") == "code":
+        raw_levels = result.get("code_levels", [])
+        result["code_levels"] = _filter_valid_levels(raw_levels, logger)
+        if not result["code_levels"]:
+            logger.warning(f"    ⚠ 所有关卡代码均为空，该实验可能无法用于填入")
+            # 仍然返回结果，但标记为空
+            result["_incomplete"] = True
 
     await close_extra_pages(ctx, page)
     return result
@@ -188,7 +237,10 @@ async def main() -> None:
     if not source_account:
         source_account = existing_bank.get("source_account", "")
     if not source_account:
-        logger.error("请通过 --account 指定源账号，或确保已有 answer_bank.json 中包含 source_account")
+        logger.error(
+            "请通过 --account 指定源账号，"
+            "或确保已有 answer_bank.json 中包含 source_account"
+        )
         return
 
     logger.info(f"源账号: {source_account}")
@@ -210,6 +262,7 @@ async def main() -> None:
             # 进入课堂
             await page.goto(args.classroom, wait_until="networkidle", timeout=60_000)
             await page.wait_for_timeout(3000)
+            await wait_for_loading_done(page)
             await page.wait_for_selector(".li-item", timeout=15_000)
             await page.wait_for_timeout(2000)
 
@@ -222,6 +275,7 @@ async def main() -> None:
                 "experiments": existing_bank.get("experiments", {}),
             }
             total_extracted = 0
+            total_skipped_empty = 0
 
             for week in weeks:
                 await click_week(page, week)
@@ -232,6 +286,7 @@ async def main() -> None:
                     logger.warning(f"  {week}: 实验名异常，刷新页面...")
                     await page.reload(wait_until="networkidle")
                     await page.wait_for_timeout(3000)
+                    await wait_for_loading_done(page)
                     await click_week(page, week)
                     exps = await scan_experiments(page)
 
@@ -248,12 +303,30 @@ async def main() -> None:
                     status = "已完成" if is_done else "未完成"
                     logger.info(f"  提取 [{exp['name']}] ({status})")
 
-                    result = await extract_one_experiment(page, ctx, exp["name"], logger)
+                    result = await extract_one_experiment(
+                        page, ctx, exp["name"], logger
+                    )
                     if result:
-                        bank["experiments"][exp["name"]] = result
-                        total_extracted += 1
-                        logger.info(f"    ✓ 提取成功: {len(result.get('code_levels', []))} 关代码, "
-                                     f"{len(result.get('quiz', {}))} 题单选")
+                        # 检查是否因源账号未完成导致空代码
+                        if result.get("_incomplete"):
+                            total_skipped_empty += 1
+                            logger.warning(
+                                f"    ⚠ [{exp['name']}] 源账号未完成，"
+                                f"无法提取有效答案"
+                            )
+                            # 不保存不完整的实验
+                            del result["_incomplete"]
+                            if result.get("code_levels"):
+                                bank["experiments"][exp["name"]] = result
+                                total_extracted += 1
+                        else:
+                            bank["experiments"][exp["name"]] = result
+                            total_extracted += 1
+                            logger.info(
+                                f"    ✓ 提取成功: "
+                                f"{len(result.get('code_levels', []))} 关代码, "
+                                f"{len(result.get('quiz', {}))} 题单选"
+                            )
                     else:
                         logger.error(f"    ✗ 提取失败")
 
@@ -264,7 +337,11 @@ async def main() -> None:
             with open(args.output, "w", encoding="utf-8") as f:
                 json.dump(bank, f, ensure_ascii=False, indent=2)
             logger.info(f"\n{'=' * 60}")
-            logger.info(f"完成! 共提取 {total_extracted} 个实验 → {args.output}")
+            logger.info(
+                f"完成! 共提取 {total_extracted} 个实验"
+                + (f", 跳过 {total_skipped_empty} 个空实验" if total_skipped_empty else "")
+                + f" → {args.output}"
+            )
             logger.info(f"{'=' * 60}")
 
         finally:
