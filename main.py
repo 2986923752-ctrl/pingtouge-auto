@@ -301,6 +301,16 @@ async def main() -> None:
     logger.info(f"答案库: {len(bank.get('experiments', {}))} 个实验")
     logger.info(f"来源账号: {bank.get('source_account', '未知')}")
 
+    # 检查课堂是否匹配（不同课堂的测试用例可能不同）
+    bank_classroom = bank.get("classroom_url", "")
+    if bank_classroom and bank_classroom != args.classroom:
+        logger.warning("⚠" * 30)
+        logger.warning(f"答案库来源课堂: {bank_classroom}")
+        logger.warning(f"当前目标课堂:   {args.classroom}")
+        logger.warning("课堂不一致！不同课堂的测试用例可能不同，部分题目评测可能失败。")
+        logger.warning("建议用 main_build.py --classroom <目标课堂URL> 重新构建答案库。")
+        logger.warning("⚠" * 30)
+
     # 读账号
     accounts = read_accounts(args.excel, logger)
     if not accounts:
