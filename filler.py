@@ -48,7 +48,7 @@ async def _fill_editor(page: Page, code: str, logger: logging.Logger) -> bool:
 
 
 async def fill_code_to_editor(page: Page, code: str, logger: logging.Logger) -> bool:
-    """安全填入代码: 等待编辑器 → 清空 → insert_text → 验证"""
+    """安全填入代码: 等待编辑器 → 清空 → insert_text → 逐行验证"""
     await page.wait_for_selector(".cm-editor", timeout=15_000)
     await page.wait_for_timeout(800)
 
@@ -58,13 +58,41 @@ async def fill_code_to_editor(page: Page, code: str, logger: logging.Logger) -> 
         logger.error("  代码填入失败")
         return False
 
+    # 逐行读取编辑器内容，与源代码对比
     lines = await page.query_selector_all(".cm-line")
-    actual = "\n".join([(await l.text_content() or "") for l in lines])
-    if len(actual.strip()) >= len(code.strip()) * 0.5:
-        return True
-    else:
+    actual_lines = [(await l.text_content() or "") for l in lines]
+    actual = "\n".join(actual_lines)
+
+    # 长度验证
+    if len(actual.strip()) < len(code.strip()) * 0.5:
         logger.warning(f"  填入验证失败: 期望{len(code)}字符, 实际{len(actual)}字符")
         return False
+
+    # 逐行对比（发现 CodeMirror 渲染问题）
+    expected_lines = code.split("\n")
+    mismatch = False
+    for i, (exp, act) in enumerate(zip(expected_lines, actual_lines)):
+        if exp.strip() != act.strip():
+            if not mismatch:
+                logger.warning(f"  代码行不一致（编辑器渲染差异）:")
+                mismatch = True
+            logger.warning(f"    L{i+1}: 期望 {repr(exp[:60])}")
+            logger.warning(f"    L{i+1}: 实际 {repr(act[:60])}")
+
+    # 行数差异
+    if len(actual_lines) != len(expected_lines):
+        logger.warning(
+            f"  行数不一致: 期望{len(expected_lines)}行, 实际{len(actual_lines)}行"
+        )
+        # 如果行数差太多，可能是虚拟滚动导致部分行未渲染
+        if len(actual_lines) < len(expected_lines) * 0.8:
+            logger.error(
+                f"  ⚠ CodeMirror 虚拟滚动: 只渲染了 {len(actual_lines)}/{len(expected_lines)} 行！"
+                f" 代码可能不完整，评测会失败。"
+            )
+            return False
+
+    return True
 
 
 # ─── 评测与验证 ───
